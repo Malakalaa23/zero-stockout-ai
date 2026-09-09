@@ -1,0 +1,5 @@
+pydantic>=2.0
+requests>=2.31
+neo4j>=5.0
+chromadb>=0.5
+python-dotenv>=1.0
