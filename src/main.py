@@ -8,14 +8,14 @@ if sys.stdout.encoding != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
-# ضيف سطرين دول عشان الملفات تلقى بعضها
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 from graph_mock import GraphMock
 from chromadb_setup import get_collection, add_inventory_documents
 from router_agent import RouterAgent
-from llm_client import HuggingFaceLLM, MockLLM
+from llm_client import HuggingFaceLLM
 
 
 load_dotenv()
@@ -31,8 +31,8 @@ def build_llm():
             )
     except Exception as e:
         print(f"HuggingFace LLM failed: {e}")
-    print("Using Mock LLM (set HF_API_KEY for real answers)")
-    return MockLLM()
+    print("Using grounded RAG fallback (LLM unavailable)")
+    return None
 
 
 class ZeroStockoutAI:
@@ -64,20 +64,30 @@ class ZeroStockoutAI:
 if __name__ == "__main__":
     system = ZeroStockoutAI()
 
-    test_questions = [
-        "إيه المنتجات اللي هتنفد؟",
-        "إيه سياسة إعادة الطلب؟",
-        "اطلب كام وحدة من الهواتف؟",
-    ]
+    if len(sys.argv) > 1 and sys.argv[1] == "--demo":
+        questions = [
+            "What products are currently below their reorder point?",
+            "What is the reorder policy?",
+            "What is the shipping cost?",
+            "What is the storage cost per unit?",
+            "How long does DHL take to deliver?",
+            "Who is the supplier for the TV?",
+            "How many units should I order for phones?",
+        ]
+    else:
+        question = " ".join(sys.argv[1:]).strip()
+        questions = [question or input("Inventory question: ").strip()]
 
-    for q in test_questions:
+    for q in questions:
+        if not q:
+            continue
         print(f"\n{'=' * 60}")
-        print(f"سؤال: {q}")
+        print(f"Question: {q}")
         print("=" * 60)
         response = system.ask(q)
-        print(f"التصنيف: {response.intent}")
-        print(f"الإجابة:\n{response.answer}")
+        print(f"Intent: {response.intent}")
+        print(f"Answer:\n{response.answer}")
         if response.sources:
-            print(f"\nالمصادر: {len(response.sources)} وثيقة")
+            print(f"\nSources: {len(response.sources)} documents")
 
     system.close()

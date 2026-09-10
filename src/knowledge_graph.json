@@ -3,97 +3,97 @@
     {
       "id": "WH001",
       "type": "Warehouse",
-      "name": "العبور",
-      "location": "القاهرة"
+      "name": "Obour",
+      "location": "Cairo"
     },
     {
       "id": "WH002",
       "type": "Warehouse",
-      "name": "أكتوبر",
-      "location": "الجيزة"
+      "name": "October",
+      "location": "Giza"
     },
     {
       "id": "WH003",
       "type": "Warehouse",
-      "name": "العاصمة",
-      "location": "القاهرة"
+      "name": "Capital",
+      "location": "Cairo"
     },
     {
       "id": "WH004",
       "type": "Warehouse",
-      "name": "الإسكندرية",
-      "location": "الإسكندرية"
+      "name": "Alexandria",
+      "location": "Alexandria"
     },
     {
       "id": "WH005",
       "type": "Warehouse",
-      "name": "بورسعيد",
-      "location": "بورسعيد"
+      "name": "Port Said",
+      "location": "Port Said"
     },
     {
       "id": "P001",
       "type": "Product",
-      "name": "حذاء رياضي",
-      "category": "أحذية"
+      "name": "Sports Shoe",
+      "category": "Footwear"
     },
     {
       "id": "P002",
       "type": "Product",
-      "name": "تلفزيون",
-      "category": "إلكترونيات"
+      "name": "Television",
+      "category": "Electronics"
     },
     {
       "id": "P003",
       "type": "Product",
-      "name": "ثلاجة",
-      "category": "أجهزة منزلية"
+      "name": "Refrigerator",
+      "category": "Home Appliances"
     },
     {
       "id": "P004",
       "type": "Product",
-      "name": "لابتوب",
-      "category": "إلكترونيات"
+      "name": "Laptop",
+      "category": "Electronics"
     },
     {
       "id": "P005",
       "type": "Product",
-      "name": "هاتف",
-      "category": "إلكترونيات"
+      "name": "Phone",
+      "category": "Electronics"
     },
     {
       "id": "P006",
       "type": "Product",
-      "name": "جهاز لوحي",
-      "category": "إلكترونيات"
+      "name": "Tablet",
+      "category": "Electronics"
     },
     {
       "id": "P007",
       "type": "Product",
-      "name": "غسالة",
-      "category": "أجهزة منزلية"
+      "name": "Washing Machine",
+      "category": "Home Appliances"
     },
     {
       "id": "P008",
       "type": "Product",
-      "name": "مكيف",
-      "category": "أجهزة منزلية"
+      "name": "Air Conditioner",
+      "category": "Home Appliances"
     },
     {
       "id": "P009",
       "type": "Product",
-      "name": "ساعة",
-      "category": "إكسسوارات"
+      "name": "Watch",
+      "category": "Accessories"
     },
     {
       "id": "P010",
       "type": "Product",
-      "name": "لعبة",
-      "category": "ألعاب"
+      "name": "Toy",
+      "category": "Toys"
     },
     {
       "id": "SUP001",
       "type": "Supplier",
-      "name": "المورد العربي"
+      "name": "Arabian Supplier"
     },
     {
       "id": "SUP002",
@@ -108,7 +108,7 @@
     {
       "id": "SUP004",
       "type": "Supplier",
-      "name": "مصر للمنتجات"
+      "name": "Egypt Products"
     },
     {
       "id": "SUP005",
@@ -138,7 +138,7 @@
     {
       "id": "CAR005",
       "type": "Carrier",
-      "name": "النقل البري"
+      "name": "Land Transport"
     },
     {
       "id": "INV001",

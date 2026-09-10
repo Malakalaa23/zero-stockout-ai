@@ -27,24 +27,23 @@ def get_collection(name: str = "inventory_docs", data_dir: Optional[str] = None)
 
 def add_inventory_documents(collection) -> int:
     documents = [
-        {"id": "policy_restock", "text": "سياسة إعادة الطلب: يتم إعادة الطلب تلقائياً عندما يصل المخزون إلى 30 وحدة أو أقل", "type": "policy"},
-        {"id": "carrier_dhl", "text": "المورد DHL: يوصل خلال 2-3 أيام عمل، تكلفة الشحن 50 دولار لكل شحنة", "type": "carrier"},
-        {"id": "carrier_local", "text": "المورد البديل المحلي: يوصل خلال 24 ساعة، تكلفة الشحن 100 دولار للشحنة", "type": "carrier"},
-        {"id": "cost_shipping", "text": "تكلفة الشحن: 50 دولار لكل شحنة + 5 دولار لكل وحدة", "type": "cost"},
-        {"id": "cost_storage", "text": "تكلفة التخزين: 2 دولار لكل وحدة في اليوم", "type": "cost"},
-        {"id": "cost_stockout", "text": "تكلفة نفاد المخزون: 100 دولار لكل وحدة مفقودة", "type": "cost"},
-        {"id": "top_selling", "text": "المنتجات الأكثر مبيعاً: الهواتف، اللابتوبات، وأجهزة التلفزيون", "type": "sales"},
-        {"id": "return_policy", "text": "سياسة الإرجاع: يمكن إرجاع المنتجات خلال 14 يوماً من الشراء", "type": "policy"},
-        {"id": "safety_stock", "text": "المخزون الآمن: يجب أن يكون 30% من الحد الأقصى للطلب الشهري", "type": "policy"},
-        {"id": "delivery_times", "text": "أوقات التسليم: DHL 2-3 أيام، FedEx 3 أيام، Aramex 2 أيام", "type": "carrier"},
+        {"id": "policy_restock", "text": "Reorder policy: automatically reorder when stock reaches 30 units or less.", "type": "policy"},
+        {"id": "carrier_dhl", "text": "DHL delivers in 2-3 business days. Shipping costs 50 dollars per shipment.", "type": "carrier"},
+        {"id": "carrier_local", "text": "The local alternative supplier delivers within 24 hours and costs 100 dollars per shipment.", "type": "carrier"},
+        {"id": "cost_shipping", "text": "Shipping cost: 50 dollars per shipment plus 5 dollars per unit.", "type": "cost"},
+        {"id": "cost_storage", "text": "Storage cost: 2 dollars per unit per day.", "type": "cost"},
+        {"id": "cost_stockout", "text": "Stockout cost: 100 dollars per lost unit.", "type": "cost"},
+        {"id": "top_selling", "text": "Top-selling products: phones, laptops, and televisions.", "type": "sales"},
+        {"id": "return_policy", "text": "Return policy: products can be returned within 14 days of purchase.", "type": "policy"},
+        {"id": "safety_stock", "text": "Safety stock should be 30% of the maximum monthly demand.", "type": "policy"},
+        {"id": "delivery_times", "text": "Delivery times: DHL 2-3 days, FedEx 3 days, Aramex 2 days.", "type": "carrier"},
     ]
 
-    if collection.count() == 0:
-        collection.add(
-            documents=[d["text"] for d in documents],
-            ids=[d["id"] for d in documents],
-            metadatas=[{"type": d["type"]} for d in documents]
-        )
+    collection.upsert(
+        documents=[d["text"] for d in documents],
+        ids=[d["id"] for d in documents],
+        metadatas=[{"type": d["type"]} for d in documents]
+    )
     return collection.count()
 
 
