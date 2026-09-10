@@ -1,0 +1,326 @@
+{
+  "nodes": [
+    {
+      "id": "WH001",
+      "type": "Warehouse",
+      "name": "العبور",
+      "location": "القاهرة"
+    },
+    {
+      "id": "WH002",
+      "type": "Warehouse",
+      "name": "أكتوبر",
+      "location": "الجيزة"
+    },
+    {
+      "id": "WH003",
+      "type": "Warehouse",
+      "name": "العاصمة",
+      "location": "القاهرة"
+    },
+    {
+      "id": "WH004",
+      "type": "Warehouse",
+      "name": "الإسكندرية",
+      "location": "الإسكندرية"
+    },
+    {
+      "id": "WH005",
+      "type": "Warehouse",
+      "name": "بورسعيد",
+      "location": "بورسعيد"
+    },
+    {
+      "id": "P001",
+      "type": "Product",
+      "name": "حذاء رياضي",
+      "category": "أحذية"
+    },
+    {
+      "id": "P002",
+      "type": "Product",
+      "name": "تلفزيون",
+      "category": "إلكترونيات"
+    },
+    {
+      "id": "P003",
+      "type": "Product",
+      "name": "ثلاجة",
+      "category": "أجهزة منزلية"
+    },
+    {
+      "id": "P004",
+      "type": "Product",
+      "name": "لابتوب",
+      "category": "إلكترونيات"
+    },
+    {
+      "id": "P005",
+      "type": "Product",
+      "name": "هاتف",
+      "category": "إلكترونيات"
+    },
+    {
+      "id": "P006",
+      "type": "Product",
+      "name": "جهاز لوحي",
+      "category": "إلكترونيات"
+    },
+    {
+      "id": "P007",
+      "type": "Product",
+      "name": "غسالة",
+      "category": "أجهزة منزلية"
+    },
+    {
+      "id": "P008",
+      "type": "Product",
+      "name": "مكيف",
+      "category": "أجهزة منزلية"
+    },
+    {
+      "id": "P009",
+      "type": "Product",
+      "name": "ساعة",
+      "category": "إكسسوارات"
+    },
+    {
+      "id": "P010",
+      "type": "Product",
+      "name": "لعبة",
+      "category": "ألعاب"
+    },
+    {
+      "id": "SUP001",
+      "type": "Supplier",
+      "name": "المورد العربي"
+    },
+    {
+      "id": "SUP002",
+      "type": "Supplier",
+      "name": "Global Trade Co"
+    },
+    {
+      "id": "SUP003",
+      "type": "Supplier",
+      "name": "Fast Supply"
+    },
+    {
+      "id": "SUP004",
+      "type": "Supplier",
+      "name": "مصر للمنتجات"
+    },
+    {
+      "id": "SUP005",
+      "type": "Supplier",
+      "name": "Tech Import"
+    },
+    {
+      "id": "CAR001",
+      "type": "Carrier",
+      "name": "DHL"
+    },
+    {
+      "id": "CAR002",
+      "type": "Carrier",
+      "name": "FedEx"
+    },
+    {
+      "id": "CAR003",
+      "type": "Carrier",
+      "name": "Aramex"
+    },
+    {
+      "id": "CAR004",
+      "type": "Carrier",
+      "name": "UPS"
+    },
+    {
+      "id": "CAR005",
+      "type": "Carrier",
+      "name": "النقل البري"
+    },
+    {
+      "id": "INV001",
+      "type": "Inventory",
+      "product_id": "P001",
+      "warehouse_id": "WH001",
+      "quantity": 50,
+      "reorder_point": 30
+    },
+    {
+      "id": "INV002",
+      "type": "Inventory",
+      "product_id": "P002",
+      "warehouse_id": "WH002",
+      "quantity": 20,
+      "reorder_point": 15
+    },
+    {
+      "id": "INV003",
+      "type": "Inventory",
+      "product_id": "P003",
+      "warehouse_id": "WH003",
+      "quantity": 10,
+      "reorder_point": 8
+    },
+    {
+      "id": "INV004",
+      "type": "Inventory",
+      "product_id": "P004",
+      "warehouse_id": "WH004",
+      "quantity": 35,
+      "reorder_point": 20
+    },
+    {
+      "id": "INV005",
+      "type": "Inventory",
+      "product_id": "P005",
+      "warehouse_id": "WH005",
+      "quantity": 60,
+      "reorder_point": 40
+    },
+    {
+      "id": "INV006",
+      "type": "Inventory",
+      "product_id": "P006",
+      "warehouse_id": "WH001",
+      "quantity": 25,
+      "reorder_point": 15
+    },
+    {
+      "id": "INV007",
+      "type": "Inventory",
+      "product_id": "P007",
+      "warehouse_id": "WH002",
+      "quantity": 5,
+      "reorder_point": 10
+    },
+    {
+      "id": "INV008",
+      "type": "Inventory",
+      "product_id": "P008",
+      "warehouse_id": "WH003",
+      "quantity": 45,
+      "reorder_point": 30
+    },
+    {
+      "id": "INV009",
+      "type": "Inventory",
+      "product_id": "P009",
+      "warehouse_id": "WH004",
+      "quantity": 100,
+      "reorder_point": 50
+    },
+    {
+      "id": "INV010",
+      "type": "Inventory",
+      "product_id": "P010",
+      "warehouse_id": "WH005",
+      "quantity": 80,
+      "reorder_point": 60
+    }
+  ],
+  "relationships": [
+    {
+      "from": "P001",
+      "to": "WH001",
+      "type": "STORED_AT"
+    },
+    {
+      "from": "P002",
+      "to": "WH002",
+      "type": "STORED_AT"
+    },
+    {
+      "from": "P003",
+      "to": "WH003",
+      "type": "STORED_AT"
+    },
+    {
+      "from": "P004",
+      "to": "WH004",
+      "type": "STORED_AT"
+    },
+    {
+      "from": "P005",
+      "to": "WH005",
+      "type": "STORED_AT"
+    },
+    {
+      "from": "P006",
+      "to": "WH001",
+      "type": "STORED_AT"
+    },
+    {
+      "from": "P007",
+      "to": "WH002",
+      "type": "STORED_AT"
+    },
+    {
+      "from": "P008",
+      "to": "WH003",
+      "type": "STORED_AT"
+    },
+    {
+      "from": "P009",
+      "to": "WH004",
+      "type": "STORED_AT"
+    },
+    {
+      "from": "P010",
+      "to": "WH005",
+      "type": "STORED_AT"
+    },
+    {
+      "from": "P001",
+      "to": "SUP001",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "P002",
+      "to": "SUP002",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "P003",
+      "to": "SUP003",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "P004",
+      "to": "SUP005",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "P005",
+      "to": "SUP002",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "P001",
+      "to": "CAR001",
+      "type": "SHIPPED_BY"
+    },
+    {
+      "from": "P002",
+      "to": "CAR002",
+      "type": "SHIPPED_BY"
+    },
+    {
+      "from": "P003",
+      "to": "CAR003",
+      "type": "SHIPPED_BY"
+    },
+    {
+      "from": "P004",
+      "to": "CAR004",
+      "type": "SHIPPED_BY"
+    },
+    {
+      "from": "P005",
+      "to": "CAR005",
+      "type": "SHIPPED_BY"
+    }
+  ]
+}
