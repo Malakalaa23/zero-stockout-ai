@@ -13,9 +13,9 @@ class GraphMock:
     """
     
     def __init__(self):
-        self.data_file = "knowledge_graph.json"
+        self.data_file = os.path.join(os.path.dirname(__file__), "knowledge_graph.json")
         self.graph = self.load_or_create()
-        print(" GraphMock initialized (no database needed!)")
+        print("GraphMock initialized (no database needed!)")
     
     def load_or_create(self):
         """تحميل أو إنشاء الـ Knowledge Graph"""
