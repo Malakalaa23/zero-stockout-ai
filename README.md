@@ -207,7 +207,6 @@ Once the dashboard is running:
 | `detect package in image` | Vision | Package detection result |
 
 ---
-
 ## 🧪 Testing the API
 
 ```bash
