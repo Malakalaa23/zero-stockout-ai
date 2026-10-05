@@ -6,6 +6,7 @@ Production Ready
 - Keyword-based intent routing (no external router dependency)
 - Native microphone via st.audio_input
 - Animated Background
+- Human-in-the-Loop confirmation for decision recommendations
 """
 
 import streamlit as st
@@ -18,8 +19,78 @@ import base64
 from datetime import datetime
 
 # ============================================
-# NATIVE MIC REPLACES WEBRTC (Python 3.14 compatible)
+# HUMAN-IN-THE-LOOP CONFIRMATION UI
 # ============================================
+
+def render_hitl_confirmation(recommendation: dict, sku_id: str) -> None:
+    """Render human-in-the-loop confirmation UI for an order recommendation.
+
+    Displays Confirm / Custom / Reject controls. State persists across
+    Streamlit reruns via session_state. Never auto-executes.
+
+    Args:
+        recommendation: Dict from /predict/decision with keys
+            'order_quantity', 'total_cost', 'rationale'.
+        sku_id: Product identifier for state keying.
+    """
+    st.markdown("---")
+    st.markdown(
+        '<div class="section-label">Human-in-the-Loop Confirmation</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.info(
+        "🛡️ **Decision-support system.** All orders require human approval. "
+        "The AI recommends; you decide. No order is placed automatically."
+    )
+
+    recommended_qty = int(recommendation.get("order_quantity", 0))
+    key = f"hitl_{sku_id}"
+
+    if "hitl_state" not in st.session_state:
+        st.session_state.hitl_state = {}
+    if key not in st.session_state.hitl_state:
+        st.session_state.hitl_state[key] = {
+            "status": "pending",
+            "final_qty": recommended_qty,
+        }
+
+    state = st.session_state.hitl_state[key]
+    col1, col2, col3 = st.columns([1, 1, 1])
+
+    with col1:
+        if st.button("✅ Confirm Recommendation", key=f"confirm_{sku_id}"):
+            state["status"] = "confirmed"
+            state["final_qty"] = recommended_qty
+
+    with col2:
+        custom_qty = st.number_input(
+            "Custom quantity",
+            min_value=0,
+            max_value=1_000_000,
+            value=state.get("final_qty", recommended_qty),
+            step=1,
+            key=f"custom_{sku_id}",
+        )
+        if st.button("📝 Submit Custom", key=f"custom_btn_{sku_id}"):
+            state["status"] = "modified"
+            state["final_qty"] = int(custom_qty)
+
+    with col3:
+        if st.button("❌ Reject", key=f"reject_{sku_id}"):
+            state["status"] = "rejected"
+            state["final_qty"] = 0
+
+    status = state["status"]
+    if status == "confirmed":
+        st.success(f"✅ Order confirmed: **{state['final_qty']} units**")
+    elif status == "modified":
+        st.success(f"📝 Custom order submitted: **{state['final_qty']} units**")
+    elif status == "rejected":
+        st.warning("❌ Recommendation rejected. No order placed.")
+    else:
+        st.markdown("**Status:** ⏳ Pending human review")
+
 
 # ============================================
 # PAGE CONFIG
@@ -39,6 +110,7 @@ API_ENDPOINTS = {
     "health": f"{API_BASE_URL}/predict/health",
     "forecast": f"{API_BASE_URL}/predict/forecast",
     "decision": f"{API_BASE_URL}/predict/decision",
+    "analyze": f"{API_BASE_URL}/predict/analyze",
     "vision": f"{API_BASE_URL}/predict/vision",
     "rag": f"{API_BASE_URL}/predict/rag",
     "voice_transcribe": f"{API_BASE_URL}/predict/voice/transcribe",
@@ -100,6 +172,8 @@ st.markdown("""
     .agent-desc { color: rgba(255,255,255,0.5) !important; font-size: 0.8rem; line-height: 1.6; font-weight: 300; }
     .agent-status { display: inline-flex; align-items: center; gap: 6px; padding: 3px 14px; border-radius: 100px; font-size: 0.55rem; font-weight: 500; letter-spacing: 0.5px; text-transform: uppercase; margin-top: 14px; background: rgba(74, 222, 128, 0.08); color: rgba(74, 222, 128, 0.6) !important; border: 1px solid rgba(74, 222, 128, 0.06); }
     .agent-status .dot { width: 5px; height: 5px; border-radius: 50%; background: #4ade80; animation: pulse-dot 2s ease-in-out infinite; }
+    .agent-status.prototype { background: rgba(251, 191, 36, 0.08); color: rgba(251, 191, 36, 0.7) !important; border: 1px solid rgba(251, 191, 36, 0.06); }
+    .agent-status.prototype .dot { background: #fbbf24; }
     .demo-container { background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.06); border-radius: 20px; padding: 35px 40px; margin-top: 30px; backdrop-filter: blur(20px); }
     .demo-title { color: #ffffff !important; font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
     .demo-sub { color: rgba(255,255,255,0.4) !important; font-size: 0.9rem; font-weight: 300; margin-bottom: 20px; }
@@ -263,7 +337,7 @@ with a3:
             <span class="agent-emoji">📊</span>
             <div class="agent-title">Forecast Agent</div>
             <div class="agent-desc">TFT Transformer forecasting with 7 quantiles for uncertainty.</div>
-            <div class="agent-status"><span class="dot"></span> Active</div>
+            <div class="agent-status prototype"><span class="dot"></span> Prototype</div>
         </div>
     """, unsafe_allow_html=True)
 with a4:
@@ -272,7 +346,7 @@ with a4:
             <span class="agent-emoji">👁️</span>
             <div class="agent-title">Vision Agent</div>
             <div class="agent-desc">YOLOv12 package detection. Real-time inventory verification.</div>
-            <div class="agent-status"><span class="dot"></span> Active</div>
+            <div class="agent-status prototype"><span class="dot"></span> Prototype</div>
         </div>
     """, unsafe_allow_html=True)
 
@@ -335,7 +409,7 @@ if user_query:
             # Keyword priority: forecast > rag > vision > decision
             if any(w in query_lower for w in ["forecast", "predict", "demand", "when", "ready", "finish", "next week", "next month"]):
                 agent, intent, confidence = "forecast_agent", "forecast", 0.85
-            elif any(w in query_lower for w in ["policy", "return", "refund", "contract", "supplier", "terms", "agreement"]):
+            elif any(w in query_lower for w in ["policy", "return", "refund", "contract", "supplier", "terms", "agreement", "store", "stored", "where", "low on stock", "warehouse"]):
                 agent, intent, confidence = "rag_agent", "rag", 0.80
             elif any(w in query_lower for w in ["image", "picture", "photo", "damage", "package", "box", "camera"]):
                 agent, intent, confidence = "vision_agent", "vision", 0.75
@@ -343,6 +417,8 @@ if user_query:
                 agent, intent, confidence = "decision_agent", "decision", 0.90
             else:
                 agent, intent, confidence = "decision_agent", "general", 0.70
+
+            decision_data = None
 
             # ===== FORECAST AGENT =====
             if agent == "forecast_agent":
@@ -424,6 +500,7 @@ if user_query:
                 )
                 if response.status_code == 200:
                     data = response.json()
+                    decision_data = data
                     order_qty = data.get("order_quantity", 105)
                     total_cost = data.get("total_cost", 575.0)
                     confidence_score = data.get("confidence", 0.85)
@@ -455,6 +532,10 @@ if user_query:
             agent_display = agent.replace('_agent', '').title()
             st.caption(f"🤖 Handled by: {agent_display} Agent (Intent: {intent}, Confidence: {confidence:.0%})")
 
+            # ===== HUMAN-IN-THE-LOOP CONFIRMATION (Decision Agent only) =====
+            if agent == "decision_agent" and decision_data is not None:
+                render_hitl_confirmation(decision_data, sku_id="P001")
+
         except requests.exceptions.ConnectionError:
             st.error("❌ Cannot connect to backend API. Please make sure the backend is running.")
             st.info("Run: `cd backend && python main.py`")
@@ -485,21 +566,24 @@ with st.sidebar:
                 Zero-Stockout
             </div>
             <div style="color: rgba(255,255,255,0.15); font-size: 0.55rem; letter-spacing: 2.5px; margin-top: 2px;">
-                v2.0 • Production Ready
+                v2.0 • Proof of Concept
             </div>
             <hr style="border-color: rgba(255,255,255,0.03); margin: 20px 0;">
             <div style="text-align: left; font-size: 0.7rem; color: rgba(255,255,255,0.25); line-height: 2.4; letter-spacing: 0.5px;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span>🔄 TFT-MPIR</span><span style="color: rgba(74, 222, 128, 0.3);">✓</span>
+                    <span>🧠 Decision Agent</span><span style="color: rgba(74, 222, 128, 0.5);">✓ Live</span>
                 </div>
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span>📊 GraphRAG</span><span style="color: rgba(74, 222, 128, 0.3);">✓</span>
+                    <span>📚 Knowledge Agent</span><span style="color: rgba(74, 222, 128, 0.5);">✓ Live</span>
                 </div>
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span>👁️ YOLOv12</span><span style="color: rgba(74, 222, 128, 0.3);">✓</span>
+                    <span>📊 Forecast Agent</span><span style="color: rgba(251, 191, 36, 0.5);">⚠ Prototype</span>
                 </div>
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span>🎤 Voice AI</span><span style="color: rgba(74, 222, 128, 0.3);">✓</span>
+                    <span>👁️ Vision Agent</span><span style="color: rgba(251, 191, 36, 0.5);">⚠ Prototype</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>🛡️ Human-in-the-Loop</span><span style="color: rgba(74, 222, 128, 0.5);">✓ Enabled</span>
                 </div>
             </div>
             <hr style="border-color: rgba(255,255,255,0.03); margin: 20px 0;">

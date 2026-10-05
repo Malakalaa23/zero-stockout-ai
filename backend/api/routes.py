@@ -99,7 +99,7 @@ async def decision(
     """
     Calculate optimal order quantity using the TFT-MPIR Decision Agent.
 
-    The agent uses a trained neural network if model files are present,
+    The agent uses the trained neural network if model files are present,
     otherwise falls back to exhaustive cost minimization.
     """
     try:
@@ -118,11 +118,12 @@ async def decision(
             "shipping_per_unit": shipping_per_unit,
         })
 
-        # Get recommendation
+        # Get recommendation — pass unit_cost for the trained model's features
         result = agent.recommend(
             demand_forecast=forecast_values,
             current_stock=current_stock,
             days=forecast_days,
+            unit_cost=unit_cost,
         )
 
         return {

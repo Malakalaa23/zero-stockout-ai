@@ -1,18 +1,19 @@
 ﻿"""
 TFT-MPIR: End-to-End Multi-Period Inventory Replenishment
-Decision Agent for Malak's Zero-Stockout system.
+Decision Agent for Zero-Stockout system.
 
-Two modes:
-  1. Trained neural network (if model artifacts exist)
-  2. Brute-force cost minimization (fallback)
-
-Both compute the same thing: the order quantity that minimizes
-total cost = stockout + holding + shipping.
+Loads the trained decision_model.pth neural network and uses it to
+predict the optimal order quantity. Falls back to exhaustive cost
+minimization if the model is unavailable.
 """
 
 from typing import List, Dict, Tuple, Optional
 import os
+import pickle
 import logging
+import math
+from datetime import datetime
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -21,18 +22,17 @@ logger = logging.getLogger(__name__)
 class TFTMPIR_DecisionAgent:
     """
     Decision Agent implementing TFT-MPIR for optimal inventory replenishment.
-
-    Given a demand forecast + current stock, outputs the cost-optimal order qty.
+    Loads the trained neural network from disk; falls back to brute-force
+    cost minimization if unavailable.
     """
 
     def __init__(self, cost_params: Optional[Dict[str, float]] = None):
-        # Cost parameters are injected — each SKU can have its own
         self.holding_cost = cost_params.get('holding', 2.0) if cost_params else 2.0
         self.stockout_cost = cost_params.get('stockout', 100.0) if cost_params else 100.0
         self.shipping_base = cost_params.get('shipping_base', 50.0) if cost_params else 50.0
         self.shipping_per_unit = cost_params.get('shipping_per_unit', 5.0) if cost_params else 5.0
 
-        # Model artifacts (populated by _load_model if files exist)
+        # Model artifacts
         self.model = None
         self.scaler = None
         self.features = None
@@ -43,79 +43,168 @@ class TFTMPIR_DecisionAgent:
     # MODEL LOADING
     # ============================================================
 
+    def _find_model_dir(self) -> Optional[str]:
+        """Locate the folder containing decision_model.pth."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(here, "..", "..", "models"),           # repo_root/models
+            os.path.join(here, "..", "..", "..", "models"),
+            os.path.join(here, "..", "models"),                 # backend/models
+            "models",                                            # cwd/models
+        ]
+        for c in candidates:
+            if os.path.exists(os.path.join(c, "decision_model.pth")):
+                return os.path.abspath(c)
+        return None
+
     def _load_model(self):
-        """
-        Try to load the trained neural network from disk.
-        Silent fallback if any artifact is missing — never crash the API.
-        """
         try:
-            # Find the models directory — support multiple layouts
-            here = os.path.dirname(os.path.abspath(__file__))
-            candidates = [
-                os.path.join(here, "..", "models", "router_model.pkl"),
-                os.path.join(here, "..", "models", "decision_model.pth"),
-                os.path.join(here, "..", "..", "backend", "models", "router_model.pkl"),
-            ]
-
-            model_path = None
-            for c in candidates:
-                if os.path.exists(c):
-                    model_path = os.path.abspath(c)
-                    break
-
-            if not model_path:
-                logger.info("No trained decision model found. Using cost-minimization fallback.")
+            model_dir = self._find_model_dir()
+            if not model_dir:
+                logger.info("No trained model directory found. Using cost-minimization fallback.")
                 return
 
-            # Try loading if it's the router_model.pkl (state_dict format)
-            if model_path.endswith(".pkl"):
-                try:
-                    import torch
-                    from .tft_mpir_model import TFT_MPIR_Model
+            model_path = os.path.join(model_dir, "decision_model.pth")
+            scaler_path = os.path.join(model_dir, "decision_scaler.pkl")
+            features_path = os.path.join(model_dir, "decision_features.pkl")
 
-                    # router_model.pkl is our 7-feature decision NN
-                    self.model = TFT_MPIR_Model(input_dim=7)
-                    state = torch.load(model_path, map_location="cpu")
+            if not all(os.path.exists(p) for p in [model_path, scaler_path, features_path]):
+                logger.info("Some model artifacts missing. Using fallback.")
+                return
 
-                    # Support both raw state_dict and wrapped checkpoint
-                    if isinstance(state, dict) and "state_dict" in state:
-                        state = state["state_dict"]
-                    self.model.load_state_dict(state)
-                    self.model.eval()
-                    logger.info(f"✅ Loaded trained decision model from {model_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to load neural model: {e}. Using fallback.")
-                    self.model = None
+            # Load feature list and scaler
+            with open(features_path, "rb") as f:
+                self.features = pickle.load(f)
+            with open(scaler_path, "rb") as f:
+                self.scaler = pickle.load(f)
+
+            # Import and instantiate the model
+            import torch
+            from .tft_mpir_model import TFT_MPIR_Model
+
+            self.model = TFT_MPIR_Model(input_dim=len(self.features))
+            state = torch.load(model_path, map_location="cpu", weights_only=True)
+            self.model.load_state_dict(state)
+            self.model.eval()
+
+            logger.info(f"✅ Loaded trained decision model ({len(self.features)} features, 61K params)")
 
         except Exception as e:
-            logger.warning(f"Model loading error: {e}. Using fallback.")
+            logger.warning(f"Model loading failed: {e}. Using fallback.")
             self.model = None
+            self.scaler = None
+            self.features = None
+
+    # ============================================================
+    # FEATURE ENGINEERING
+    # ============================================================
+
+    def _build_features(
+        self,
+        demand_forecast: List[float],
+        current_stock: int,
+        days: int,
+        unit_cost: float,
+    ) -> Optional[List[float]]:
+        """
+        Build the 19-feature vector the model expects, in exact order:
+        price, cost, stock, lead_time_days, sales_mean_7d, sales_mean_14d,
+        sales_mean_30d, sales_std_7d, stock_ratio, day_sin, day_cos,
+        month_sin, month_cos, is_weekend, price_change, demand_lag_1,
+        demand_lag_3, demand_lag_7, lead_time_demand
+        """
+        if not self.features:
+            return None
+
+        # Safely extract forecast windows
+        def _mean(window):
+            vals = demand_forecast[:window]
+            return float(np.mean(vals)) if vals else 0.0
+
+        def _std(window):
+            vals = demand_forecast[:window]
+            return float(np.std(vals)) if vals else 0.0
+
+        def _lag(n):
+            return float(demand_forecast[n - 1]) if len(demand_forecast) >= n else 0.0
+
+        today = datetime.now()
+        day_of_year = today.timetuple().tm_yday
+        month = today.month
+
+        mean_7d = _mean(7)
+        mean_14d = _mean(14)
+        mean_30d = _mean(30) if len(demand_forecast) >= 30 else _mean(len(demand_forecast))
+        std_7d = _std(7)
+        stock_ratio = current_stock / (mean_7d + 1.0) if mean_7d > 0 else 0.0
+
+        lead_time_days = 5.0  # default supplier lead time
+        lead_time_demand = mean_7d * lead_time_days / 7.0
+
+        feature_dict = {
+            "price": float(unit_cost),
+            "cost": float(unit_cost),
+            "stock": float(current_stock),
+            "lead_time_days": lead_time_days,
+            "sales_mean_7d": mean_7d,
+            "sales_mean_14d": mean_14d,
+            "sales_mean_30d": mean_30d,
+            "sales_std_7d": std_7d,
+            "stock_ratio": stock_ratio,
+            "day_sin": math.sin(2 * math.pi * day_of_year / 365.0),
+            "day_cos": math.cos(2 * math.pi * day_of_year / 365.0),
+            "month_sin": math.sin(2 * math.pi * month / 12.0),
+            "month_cos": math.cos(2 * math.pi * month / 12.0),
+            "is_weekend": 1.0 if today.weekday() >= 5 else 0.0,
+            "price_change": 0.0,
+            "demand_lag_1": _lag(1),
+            "demand_lag_3": _lag(3),
+            "demand_lag_7": _lag(7),
+            "lead_time_demand": lead_time_demand,
+        }
+
+        # Build vector in the exact order the scaler/model expects
+        return [feature_dict.get(f, 0.0) for f in self.features]
 
     # ============================================================
     # INFERENCE
     # ============================================================
 
-    def _predict_with_model(self, features: List[float]) -> Optional[int]:
-        """Use the trained model to predict optimal order quantity."""
-        if self.model is None:
+    def _predict_with_model(
+        self,
+        demand_forecast: List[float],
+        current_stock: int,
+        days: int,
+        unit_cost: float,
+    ) -> Optional[int]:
+        if self.model is None or self.scaler is None or self.features is None:
             return None
 
         try:
             import torch
-            features_array = np.array(features, dtype=np.float32).reshape(1, -1)
-            features_tensor = torch.FloatTensor(features_array)
+
+            features = self._build_features(demand_forecast, current_stock, days, unit_cost)
+            if features is None:
+                return None
+
+            # Scale features (fit during training)
+            arr = np.array(features, dtype=np.float32).reshape(1, -1)
+            arr_scaled = self.scaler.transform(arr)
+
+            tensor = torch.FloatTensor(arr_scaled)
 
             with torch.no_grad():
-                prediction = self.model(features_tensor).item()
+                _, q50, _ = self.model(tensor)
+                qty = float(q50.item())
 
-            return max(0, int(round(prediction)))
+            return max(0, int(round(qty)))
 
         except Exception as e:
-            logger.error(f"Prediction failed: {e}")
+            logger.error(f"Model prediction failed: {e}")
             return None
 
     # ============================================================
-    # COST FUNCTION (HEART OF THE MODEL)
+    # COST FUNCTION (FALLBACK)
     # ============================================================
 
     def compute_total_cost(
@@ -125,9 +214,6 @@ class TFTMPIR_DecisionAgent:
         current_stock: int,
         days: int,
     ) -> float:
-        """
-        Total cost = stockout + holding + shipping for a given order quantity.
-        """
         if not demand_forecast:
             raise ValueError("Demand forecast cannot be empty")
         if days <= 0:
@@ -139,21 +225,18 @@ class TFTMPIR_DecisionAgent:
 
         expected_demand = sum(demand_forecast[:days])
 
-        # Stockout: units we couldn't fulfill × penalty
         stockout_units = max(0, expected_demand - current_stock - order_qty)
         stockout_cost = stockout_units * self.stockout_cost
 
-        # Holding: average inventory × per-unit-per-day × days
         avg_inventory = current_stock - expected_demand + (order_qty / 2)
         holding_cost = max(0, avg_inventory) * self.holding_cost * days
 
-        # Shipping: fixed base + per-unit variable
         shipping_cost = self.shipping_base + (order_qty * self.shipping_per_unit)
 
         return float(stockout_cost + holding_cost + shipping_cost)
 
     # ============================================================
-    # OPTIMIZER (MODEL → FALLBACK)
+    # OPTIMIZER
     # ============================================================
 
     def optimal_quantity(
@@ -161,9 +244,11 @@ class TFTMPIR_DecisionAgent:
         demand_forecast: List[float],
         current_stock: int,
         days: int,
-    ) -> Tuple[int, float]:
+        unit_cost: float = 10.0,
+    ) -> Tuple[int, float, str]:
         """
-        Find optimal order qty using trained model, or brute-force if unavailable.
+        Returns (order_qty, total_cost, method_used).
+        Tries the trained model first; falls back to exhaustive cost minimization.
         """
         if not demand_forecast:
             raise ValueError("Demand forecast cannot be empty")
@@ -174,32 +259,18 @@ class TFTMPIR_DecisionAgent:
 
         expected_demand = sum(demand_forecast[:days])
 
-        # Early exit: stock covers demand, no order needed
+        # Early exit
         if current_stock >= expected_demand:
-            return 0, self.compute_total_cost(0, demand_forecast, current_stock, days)
+            return 0, self.compute_total_cost(0, demand_forecast, current_stock, days), "stock_sufficient"
 
-        # Try the trained model first
+        # Try the trained model
         if self.model is not None:
-            try:
-                # Build the 7-feature vector in the order the model expects
-                avg_daily = sum(demand_forecast) / len(demand_forecast)
-                features = [
-                    float(current_stock),
-                    float(expected_demand),
-                    float(days),
-                    float(self.holding_cost),
-                    float(self.stockout_cost),
-                    float(10.0),  # unit cost default
-                    float(0.85),  # confidence default
-                ]
-                qty = self._predict_with_model(features)
-                if qty is not None:
-                    cost = self.compute_total_cost(qty, demand_forecast, current_stock, days)
-                    return qty, cost
-            except Exception as e:
-                logger.warning(f"Model prediction failed, using fallback: {e}")
+            qty = self._predict_with_model(demand_forecast, current_stock, days, unit_cost)
+            if qty is not None:
+                cost = self.compute_total_cost(qty, demand_forecast, current_stock, days)
+                return qty, cost, "trained_model"
 
-        # Fallback: brute-force search
+        # Fallback: exhaustive search
         best_q = 0
         best_cost = float('inf')
         max_q = int(expected_demand * 1.5)
@@ -210,50 +281,10 @@ class TFTMPIR_DecisionAgent:
                 best_cost = cost
                 best_q = q
 
-        return best_q, best_cost
+        return best_q, best_cost, "cost_minimization"
 
     # ============================================================
-    # VECTORIZED NEWSVENDOR (O(1) ALTERNATIVE)
-    # ============================================================
-
-    def optimal_quantity_vectorized(
-        self,
-        demand_forecast: List[float],
-        current_stock: int,
-        days: int,
-    ) -> Tuple[int, float]:
-        """Fast approximation using the classical Newsvendor formula."""
-        if not demand_forecast:
-            raise ValueError("Demand forecast cannot be empty")
-        if days <= 0:
-            raise ValueError("Days must be positive")
-        if current_stock < 0:
-            raise ValueError("Current stock cannot be negative")
-
-        expected_demand = sum(demand_forecast[:days])
-
-        if current_stock >= expected_demand:
-            return 0, self.compute_total_cost(0, demand_forecast, current_stock, days)
-
-        # Newsvendor critical ratio
-        underage_cost = self.stockout_cost
-        overage_cost = self.holding_cost * days
-        critical_ratio = underage_cost / (underage_cost + overage_cost)
-
-        cumsum = np.cumsum(demand_forecast[:days])
-        qty = int(np.ceil(np.percentile(cumsum, critical_ratio * 100)))
-
-        shipping_breakpoint = self.shipping_base / self.shipping_per_unit
-        if qty < shipping_breakpoint:
-            qty = int(shipping_breakpoint)
-
-        qty = min(qty, int(expected_demand * 1.5))
-        cost = self.compute_total_cost(qty, demand_forecast, current_stock, days)
-
-        return int(qty), float(cost)
-
-    # ============================================================
-    # RECOMMENDATION WRAPPER (USER-FACING)
+    # RECOMMENDATION WRAPPER
     # ============================================================
 
     def recommend(
@@ -261,16 +292,9 @@ class TFTMPIR_DecisionAgent:
         demand_forecast: List[float],
         current_stock: int,
         days: int,
-        method: str = "auto",
+        unit_cost: float = 10.0,
     ) -> Dict[str, any]:
-        """Complete recommendation with rationale and confidence."""
-        if method == "auto":
-            method = "trained_model" if self.model is not None else "brute_force"
-
-        if method == "vectorized":
-            qty, cost = self.optimal_quantity_vectorized(demand_forecast, current_stock, days)
-        else:
-            qty, cost = self.optimal_quantity(demand_forecast, current_stock, days)
+        qty, cost, method = self.optimal_quantity(demand_forecast, current_stock, days, unit_cost)
 
         expected_demand = sum(demand_forecast[:days])
 
@@ -278,7 +302,7 @@ class TFTMPIR_DecisionAgent:
             rationale = f"Current stock ({current_stock}) is sufficient for demand ({expected_demand:.0f})"
         else:
             deficit = expected_demand - current_stock
-            if self.model is not None and method == "trained_model":
+            if method == "trained_model":
                 rationale = f"TFT-MPIR model predicts order {qty} units to cover {deficit:.0f} unit deficit"
             else:
                 rationale = f"Order {qty} units to cover {deficit:.0f} unit deficit"
@@ -292,7 +316,7 @@ class TFTMPIR_DecisionAgent:
             "stockout_cost": self.stockout_cost,
             "shipping_cost": self.shipping_base + (qty * self.shipping_per_unit),
             "rationale": rationale,
-            "confidence": 0.95 if self.model is not None else 0.85,
+            "confidence": 0.95 if method == "trained_model" else 0.85,
             "method": method,
-            "trained": self.model is not None,
+            "trained": method == "trained_model",
         }
