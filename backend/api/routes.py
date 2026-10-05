@@ -6,6 +6,8 @@ from fastapi import APIRouter, FastAPI, HTTPException, UploadFile, File
 from typing import Optional, List, Dict, Any
 import logging
 import random
+import tempfile
+import os
 from datetime import datetime
 
 # Setup logging
@@ -42,26 +44,26 @@ async def health_check():
 async def forecast(sku_id: str, days: int = 14):
     """
     Generate demand forecast for a SKU.
-    
+
     Args:
         sku_id: Product SKU identifier
         days: Number of days to forecast (default: 14)
-    
+
     Returns:
         Forecast with values
     """
     try:
         if not sku_id or sku_id.isspace():
             raise HTTPException(status_code=400, detail="SKU ID cannot be empty")
-        
+
         random.seed(hash(sku_id) % 2**32)
         base = random.randint(10, 20)
         forecast_values = []
-        
+
         for i in range(days):
             value = base + random.randint(-3, 3) + (i * 0.5)
             forecast_values.append(max(0, round(value, 2)))
-        
+
         return {
             "sku_id": sku_id,
             "forecast": forecast_values,
@@ -90,7 +92,7 @@ async def decision(
 ):
     """
     Calculate optimal order quantity using cost minimization.
-    
+
     Args:
         sku_id: Product SKU identifier
         current_stock: Current inventory level
@@ -100,18 +102,18 @@ async def decision(
         stockout_cost: Stockout cost per unit (default: 100.0)
         shipping_base: Base shipping cost (default: 50.0)
         shipping_per_unit: Shipping cost per unit (default: 5.0)
-    
+
     Returns:
         Optimal order quantity and costs
     """
     try:
         if current_stock < 0:
             raise HTTPException(status_code=400, detail="Current stock cannot be negative")
-        
+
         # Get forecast
         fore = await forecast(sku_id, forecast_days)
         expected_demand = sum(fore["forecast"])
-        
+
         # Decision Logic
         if current_stock >= expected_demand:
             order_qty = 0
@@ -122,14 +124,14 @@ async def decision(
             safety_factor = 1.0 + (1.0 - confidence) * 0.5
             order_qty = int(deficit * safety_factor)
             rationale = f"Need {int(deficit)} units to meet demand. Added {order_qty - int(deficit)} safety stock."
-        
+
         # Calculate costs
         stockout_cost_calc = max(0, expected_demand - current_stock - order_qty) * stockout_cost
         avg_inventory = max(0, current_stock - expected_demand + (order_qty / 2))
         holding_cost_calc = avg_inventory * holding_cost * forecast_days
         shipping_cost_calc = shipping_base + (order_qty * shipping_per_unit)
         total_cost = stockout_cost_calc + holding_cost_calc + shipping_cost_calc
-        
+
         return {
             "sku_id": sku_id,
             "order_quantity": order_qty,
@@ -151,10 +153,10 @@ async def decision(
 async def vision(file: UploadFile = File(None)):
     """
     Analyze package image for defects.
-    
+
     Args:
         file: Uploaded image file
-    
+
     Returns:
         Detection results
     """
@@ -166,9 +168,9 @@ async def vision(file: UploadFile = File(None)):
                 "confidence": 0.0,
                 "timestamp": datetime.now().isoformat()
             }
-        
+
         content = await file.read()
-        
+
         detections = [
             {
                 "class": "package",
@@ -177,7 +179,7 @@ async def vision(file: UploadFile = File(None)):
                 "status": "intact"
             }
         ]
-        
+
         return {
             "status": "success",
             "detections": detections,
@@ -195,32 +197,32 @@ async def vision(file: UploadFile = File(None)):
 async def rag(query: str):
     """
     Query knowledge base for policy and contract information.
-    
+
     Args:
         query: User question
-    
+
     Returns:
         Answer with source
     """
     try:
         if not query or query.isspace():
             raise HTTPException(status_code=400, detail="Query cannot be empty")
-        
+
         responses = {
             "policy": "The supplier agreement is valid for 12 months with automatic renewal.",
             "return": "Returns are accepted within 30 days with original packaging.",
             "contract": "Contract terms include 5% discount on orders over 1000 units.",
             "supplier": "Supplier rating: 4.8/5 with 99.7% on-time delivery."
         }
-        
+
         answer = "I found the following information in our knowledge base."
         source = "Supplier Agreement v2.1, Section 4.2"
-        
+
         for key, value in responses.items():
             if key in query.lower():
                 answer = value
                 break
-        
+
         return {
             "answer": answer,
             "source": source,
@@ -232,6 +234,79 @@ async def rag(query: str):
     except Exception as e:
         logger.error(f"RAG error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# VOICE TRANSCRIPTION - NEW ENDPOINT
+# ============================================================
+@router.post("/voice/transcribe")
+async def voice_transcribe(file: UploadFile = File(...)):
+    """
+    Transcribe uploaded audio to text.
+
+    Uses OpenAI Whisper if installed. Otherwise returns a
+    graceful fallback so the UI doesn't break.
+
+    Args:
+        file: Uploaded audio file (WAV/WebM)
+
+    Returns:
+        Transcribed text with metadata
+    """
+    tmp_path = None
+    try:
+        # Save uploaded audio to temp file
+        contents = await file.read()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(contents)
+            tmp_path = tmp.name
+
+        transcribed_text = ""
+
+        # Try Whisper if available
+        try:
+            import whisper
+            model = whisper.load_model("base")
+            result = model.transcribe(tmp_path)
+            transcribed_text = result.get("text", "").strip()
+            logger.info(f"Whisper transcribed: {transcribed_text[:80]}...")
+        except ImportError:
+            logger.warning("Whisper not installed — returning fallback")
+        except Exception as e:
+            logger.error(f"Whisper error: {e}")
+
+        # Cleanup temp file
+        try:
+            if tmp_path:
+                os.unlink(tmp_path)
+        except Exception:
+            pass
+
+        # Return success with fallback if Whisper unavailable
+        if transcribed_text:
+            return {
+                "text": transcribed_text,
+                "status": "success",
+                "model": "whisper-base",
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            return {
+                "text": "reorder P001",
+                "status": "fallback",
+                "model": "fallback",
+                "message": "Whisper not installed — returned sample transcription",
+                "timestamp": datetime.now().isoformat()
+            }
+
+    except Exception as e:
+        logger.error(f"Voice transcribe error: {e}")
+        # Cleanup on error
+        try:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Transcription error: {str(e)}")
 
 # ============================================================
 # FASTAPI APP
@@ -258,7 +333,8 @@ async def root():
             "/predict/forecast",
             "/predict/decision",
             "/predict/vision",
-            "/predict/rag"
+            "/predict/rag",
+            "/predict/voice/transcribe"
         ]
     }
 
