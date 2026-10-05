@@ -5,7 +5,6 @@
 from fastapi import APIRouter, FastAPI, HTTPException, UploadFile, File
 from typing import Optional, List, Dict, Any
 import logging
-import random
 import tempfile
 import os
 from datetime import datetime
@@ -20,9 +19,15 @@ logger = logging.getLogger(__name__)
 # ============================================================
 from agents.decision_agent import TFTMPIR_DecisionAgent
 from agents.rag_agent import get_rag_agent
+from agents.forecast_agent import ForecastAgent
 
 # VisionAgent is imported lazily inside endpoints to avoid
 # crashing the whole API if ultralytics fails to load.
+
+# ============================================================
+# AGENT INSTANCES (loaded once at import time)
+# ============================================================
+_forecast_agent = ForecastAgent()
 
 # ============================================================
 # ROUTER
@@ -48,38 +53,33 @@ async def health_check():
     }
 
 # ============================================================
-# FORECAST
+# FORECAST - Uses real ForecastAgent (statistical or TFT)
 # ============================================================
 @router.post("/forecast")
 async def forecast(sku_id: str, days: int = 14):
     """
     Generate demand forecast for a SKU.
 
+    Uses TFT if checkpoint is available at backend/models/best-tft.ckpt.
+    Otherwise uses statistical exponential smoothing with weekly seasonality.
+
     Args:
         sku_id: Product SKU identifier
-        days: Number of days to forecast (default: 14)
+        days: Number of days to forecast (default: 14, max: 30)
 
     Returns:
-        Forecast with values
+        Forecast with values, confidence, and method
     """
     try:
         if not sku_id or sku_id.isspace():
             raise HTTPException(status_code=400, detail="SKU ID cannot be empty")
+        if days <= 0 or days > 30:
+            raise HTTPException(status_code=400, detail="days must be between 1 and 30")
 
-        random.seed(hash(sku_id) % 2**32)
-        base = random.randint(10, 20)
-        forecast_values = []
+        result = _forecast_agent.predict(sku_id=sku_id, days=days)
+        result["timestamp"] = datetime.now().isoformat()
+        return result
 
-        for i in range(days):
-            value = base + random.randint(-3, 3) + (i * 0.5)
-            forecast_values.append(max(0, round(value, 2)))
-
-        return {
-            "sku_id": sku_id,
-            "forecast": forecast_values,
-            "confidence": round(0.85 + random.random() * 0.1, 2),
-            "timestamp": datetime.now().isoformat()
-        }
     except HTTPException:
         raise
     except Exception as e:
@@ -400,6 +400,7 @@ async def predict_full(
             "forecast": {
                 "daily_demand": demand,
                 "confidence": fore.get("confidence", 0.85),
+                "method": fore.get("method", "statistical"),
             },
             "damage_detections": damage_detections,
             "vision_error": vision_error,
