@@ -1,5 +1,5 @@
 ﻿# backend/api/routes.py
-# ZERO-STOCKOUT AI API - NO PYDANTIC VERSION
+# ZERO-STOCKOUT AI API
 # Works on Python 3.14 with Pydantic 1.10.13
 
 from fastapi import APIRouter, FastAPI, HTTPException, UploadFile, File
@@ -13,6 +13,12 @@ from datetime import datetime
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# AGENT IMPORTS
+# ============================================================
+from agents.decision_agent import TFTMPIR_DecisionAgent
+from agents.rag_agent import get_rag_agent
 
 # ============================================================
 # ROUTER
@@ -38,7 +44,7 @@ async def health_check():
     }
 
 # ============================================================
-# FORECAST - No Pydantic models
+# FORECAST
 # ============================================================
 @router.post("/forecast")
 async def forecast(sku_id: str, days: int = 14):
@@ -77,7 +83,7 @@ async def forecast(sku_id: str, days: int = 14):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# DECISION - No Pydantic models
+# DECISION - Uses TFT-MPIR Decision Agent
 # ============================================================
 @router.post("/decision")
 async def decision(
@@ -91,55 +97,46 @@ async def decision(
     shipping_per_unit: float = 5.0
 ):
     """
-    Calculate optimal order quantity using cost minimization.
+    Calculate optimal order quantity using the TFT-MPIR Decision Agent.
 
-    Args:
-        sku_id: Product SKU identifier
-        current_stock: Current inventory level
-        unit_cost: Cost per unit (default: 10.0)
-        forecast_days: Forecast horizon (default: 14)
-        holding_cost: Holding cost per unit per day (default: 2.0)
-        stockout_cost: Stockout cost per unit (default: 100.0)
-        shipping_base: Base shipping cost (default: 50.0)
-        shipping_per_unit: Shipping cost per unit (default: 5.0)
-
-    Returns:
-        Optimal order quantity and costs
+    The agent uses a trained neural network if model files are present,
+    otherwise falls back to exhaustive cost minimization.
     """
     try:
         if current_stock < 0:
             raise HTTPException(status_code=400, detail="Current stock cannot be negative")
 
-        # Get forecast
+        # Get forecast from the forecast endpoint
         fore = await forecast(sku_id, forecast_days)
-        expected_demand = sum(fore["forecast"])
+        forecast_values = fore["forecast"]
 
-        # Decision Logic
-        if current_stock >= expected_demand:
-            order_qty = 0
-            rationale = f"Current stock ({current_stock}) sufficient for demand ({expected_demand:.0f})"
-        else:
-            deficit = expected_demand - current_stock
-            confidence = fore["confidence"]
-            safety_factor = 1.0 + (1.0 - confidence) * 0.5
-            order_qty = int(deficit * safety_factor)
-            rationale = f"Need {int(deficit)} units to meet demand. Added {order_qty - int(deficit)} safety stock."
+        # Instantiate the agent with the request's cost parameters
+        agent = TFTMPIR_DecisionAgent({
+            "holding": holding_cost,
+            "stockout": stockout_cost,
+            "shipping_base": shipping_base,
+            "shipping_per_unit": shipping_per_unit,
+        })
 
-        # Calculate costs
-        stockout_cost_calc = max(0, expected_demand - current_stock - order_qty) * stockout_cost
-        avg_inventory = max(0, current_stock - expected_demand + (order_qty / 2))
-        holding_cost_calc = avg_inventory * holding_cost * forecast_days
-        shipping_cost_calc = shipping_base + (order_qty * shipping_per_unit)
-        total_cost = stockout_cost_calc + holding_cost_calc + shipping_cost_calc
+        # Get recommendation
+        result = agent.recommend(
+            demand_forecast=forecast_values,
+            current_stock=current_stock,
+            days=forecast_days,
+        )
 
         return {
             "sku_id": sku_id,
-            "order_quantity": order_qty,
-            "total_cost": round(total_cost, 2),
-            "confidence": fore["confidence"],
-            "rationale": rationale,
+            "order_quantity": result["order_quantity"],
+            "total_cost": round(result["total_cost"], 2),
+            "expected_demand": round(result["expected_demand"], 2),
+            "confidence": result["confidence"],
+            "rationale": result["rationale"],
+            "method": result["method"],
+            "trained": result["trained"],
             "timestamp": datetime.now().isoformat()
         }
+
     except HTTPException:
         raise
     except Exception as e:
@@ -147,7 +144,7 @@ async def decision(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# VISION - No Pydantic models
+# VISION
 # ============================================================
 @router.post("/vision")
 async def vision(file: UploadFile = File(None)):
@@ -191,42 +188,30 @@ async def vision(file: UploadFile = File(None)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# RAG - No Pydantic models
+# RAG - Uses Jumana's knowledge graph
 # ============================================================
 @router.post("/rag")
 async def rag(query: str):
     """
-    Query knowledge base for policy and contract information.
+    Query knowledge base for policy, inventory, and product information.
 
     Args:
-        query: User question
+        query: User question (English or Arabic)
 
     Returns:
-        Answer with source
+        Answer with source and confidence
     """
     try:
         if not query or query.isspace():
             raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-        responses = {
-            "policy": "The supplier agreement is valid for 12 months with automatic renewal.",
-            "return": "Returns are accepted within 30 days with original packaging.",
-            "contract": "Contract terms include 5% discount on orders over 1000 units.",
-            "supplier": "Supplier rating: 4.8/5 with 99.7% on-time delivery."
-        }
-
-        answer = "I found the following information in our knowledge base."
-        source = "Supplier Agreement v2.1, Section 4.2"
-
-        for key, value in responses.items():
-            if key in query.lower():
-                answer = value
-                break
+        agent = get_rag_agent()
+        result = agent.query(query)
 
         return {
-            "answer": answer,
-            "source": source,
-            "confidence": 0.88,
+            "answer": result["answer"],
+            "source": result["source"],
+            "confidence": result["confidence"],
             "timestamp": datetime.now().isoformat()
         }
     except HTTPException:
@@ -236,7 +221,7 @@ async def rag(query: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# VOICE TRANSCRIPTION - NEW ENDPOINT
+# VOICE TRANSCRIPTION
 # ============================================================
 @router.post("/voice/transcribe")
 async def voice_transcribe(file: UploadFile = File(...)):
@@ -245,16 +230,9 @@ async def voice_transcribe(file: UploadFile = File(...)):
 
     Uses OpenAI Whisper if installed. Otherwise returns a
     graceful fallback so the UI doesn't break.
-
-    Args:
-        file: Uploaded audio file (WAV/WebM)
-
-    Returns:
-        Transcribed text with metadata
     """
     tmp_path = None
     try:
-        # Save uploaded audio to temp file
         contents = await file.read()
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             tmp.write(contents)
@@ -262,7 +240,6 @@ async def voice_transcribe(file: UploadFile = File(...)):
 
         transcribed_text = ""
 
-        # Try Whisper if available
         try:
             import whisper
             model = whisper.load_model("base")
@@ -274,14 +251,12 @@ async def voice_transcribe(file: UploadFile = File(...)):
         except Exception as e:
             logger.error(f"Whisper error: {e}")
 
-        # Cleanup temp file
         try:
             if tmp_path:
                 os.unlink(tmp_path)
         except Exception:
             pass
 
-        # Return success with fallback if Whisper unavailable
         if transcribed_text:
             return {
                 "text": transcribed_text,
@@ -300,7 +275,6 @@ async def voice_transcribe(file: UploadFile = File(...)):
 
     except Exception as e:
         logger.error(f"Voice transcribe error: {e}")
-        # Cleanup on error
         try:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
