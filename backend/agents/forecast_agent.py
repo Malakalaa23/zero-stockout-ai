@@ -1,9 +1,10 @@
 ﻿"""
-Forecast Agent — real demand forecasting.
+Forecast Agent — demand forecasting.
 
-Uses exponential smoothing with day-of-week seasonality.
-If a TFT checkpoint exists at backend/models/best-tft.ckpt,
-it will load and use that instead.
+Primary: TFT (Temporal Fusion Transformer) checkpoint from Sara.
+Fallback: Holt-Winters exponential smoothing with weekly seasonality.
+
+Uses manual model reconstruction to load a GPU-trained checkpoint on CPU.
 
 Author: Sara (Forecast Lead) / integrated by Malak
 """
@@ -11,50 +12,209 @@ Author: Sara (Forecast Lead) / integrated by Malak
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# TFT model config (from Sara's training)
+TFT_ENCODER_LENGTH = 24
+TFT_PREDICTION_LENGTH = 6
+
+# Sara trained on 3 stores x 30 items from the DEPI dataset
+TFT_STORES = ["CA_1", "TX_1", "WI_1"]
+TFT_ITEMS = [str(i) for i in range(1, 31)]
+
 
 class ForecastAgent:
-    """Demand forecasting agent.
+    """Demand forecasting agent with TFT + statistical fallback."""
 
-    Loads the TFT checkpoint if available. Falls back to exponential
-    smoothing with weekly seasonality — deterministic, defensible,
-    no external dependencies.
-    """
+    def __init__(self, model_path: Optional[str] = None, dataset_path: Optional[str] = None) -> None:
+        base = Path(__file__).parent.parent / "models"
+        self.model_path = model_path or str(base / "best-tft.ckpt")
+        self.dataset_path = dataset_path or str(base / "training_dataset.pkl")
 
-    def __init__(self, model_path: Optional[str] = None) -> None:
-        self.model_path = model_path or str(
-            Path(__file__).parent.parent / "models" / "best-tft.ckpt"
-        )
         self._tft_model = None
+        self._tft_training_dataset = None
         self._tft_available = False
         self._load_tft()
 
+    # ============================================================
+    # TFT LOADING — MANUAL RECONSTRUCTION (NO LIGHTNING)
+    # ============================================================
+
     def _load_tft(self) -> None:
-        """Try to load a TFT checkpoint. Silently falls back if missing."""
-        path = Path(self.model_path)
-        if not path.exists():
-            logger.info("TFT checkpoint not found at %s — using statistical fallback", path)
+        """Load Sara's TFT checkpoint via manual reconstruction. No CUDA, no Lightning."""
+        model_p = Path(self.model_path)
+        dataset_p = Path(self.dataset_path)
+
+        if not model_p.exists():
+            logger.info(f"TFT checkpoint not found at {model_p} - using statistical fallback")
             return
+        if not dataset_p.exists():
+            logger.info(f"TFT training dataset not found at {dataset_p} - using statistical fallback")
+            return
+
         try:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
             import torch
             from pytorch_forecasting import TemporalFusionTransformer
 
-            self._tft_model = TemporalFusionTransformer.load_from_checkpoint(str(path))
+            logger.info("Loading TFT checkpoint (manual reconstruction, CPU-only)...")
+            ckpt = torch.load(str(model_p), map_location="cpu", weights_only=False)
+
+            hp = dict(ckpt["hyper_parameters"])
+
+            # Drop hparams that are nn.Modules or non-reconstructable
+            for key in ["loss", "logging_metrics", "state_dict", "monotone_constraints"]:
+                hp.pop(key, None)
+
+            # Reconstruct model from hyperparameters
+            logger.info("Reconstructing model from hyperparameters...")
+            self._tft_model = TemporalFusionTransformer(**hp)
             self._tft_model.eval()
+
+            # Load trained weights
+            missing, unexpected = self._tft_model.load_state_dict(
+                ckpt["state_dict"], strict=False
+            )
+            if missing:
+                logger.info(f"  Missing keys: {len(missing)}")
+            if unexpected:
+                logger.info(f"  Unexpected keys: {len(unexpected)}")
+
+            # Force every parameter to CPU
+            for param in self._tft_model.parameters():
+                param.data = param.data.to("cpu")
+            for buf in self._tft_model.buffers():
+                buf.data = buf.data.to("cpu")
+
+            logger.info("Loading TFT training dataset (24 MB)...")
+            with open(dataset_p, "rb") as f:
+                self._tft_training_dataset = pickle.load(f)
+
             self._tft_available = True
-            logger.info("✅ Loaded TFT checkpoint from %s", path)
+            logger.info("TFT loaded - real transformer forecasting enabled")
+
         except Exception as exc:
-            logger.warning("TFT load failed: %s — using statistical fallback", exc)
+            logger.warning(f"TFT load failed: {exc} - using statistical fallback")
+            self._tft_available = False
 
     # ============================================================
-    # STATISTICAL FORECAST — Holt-Winters-lite
+    # TFT INFERENCE
+    # ============================================================
+
+    def _sku_to_group(self, sku_id: str) -> tuple:
+        """Map arbitrary SKU ID to a valid (store_id, item_number) pair."""
+        digits = "".join(c for c in sku_id if c.isdigit())
+        if digits:
+            item_num = str(int(digits) % 30 + 1)
+        else:
+            item_num = str(abs(hash(sku_id)) % 30 + 1)
+
+        store = TFT_STORES[abs(hash(sku_id)) % len(TFT_STORES)]
+        return store, item_num
+
+    def _build_prediction_df(self, sku_id: str, history: List[float]) -> pd.DataFrame:
+        """Build a 30-day history dataframe matching Sara's schema for TFT inference."""
+        store, item_num = self._sku_to_group(sku_id)
+
+        n = 30
+        if len(history) >= n:
+            values = list(history[-n:])
+        else:
+            pad = list(history) if history else [10.0] * n
+            values = (pad * ((n // len(pad)) + 1))[:n]
+
+        end = pd.Timestamp.today().normalize()
+        dates = pd.date_range(end=end, periods=n, freq="D")
+        start_time_idx = 100000
+
+        rows = []
+        for i, (date, val) in enumerate(zip(dates, values)):
+            rows.append({
+                "store_id": store,
+                "item_number": item_num,
+                "item_category": "FOODS",
+                "item_subcategory": "1",
+                "day_of_week": str(date.dayofweek),
+                "time_idx": start_time_idx + i,
+                "month": date.month,
+                "year": date.year,
+                "day": date.day,
+                "is_holiday": 0,
+                "is_weekend": int(date.dayofweek >= 5),
+                "snap": 0,
+                "is_event": 0,
+                "event_count": 0,
+                "event_impact": 0.0,
+                "wday_x_snap": 0,
+                "sell_price": 10.0,
+                "target": float(val),
+                "lag_1": float(values[i - 1]) if i >= 1 else float(val),
+                "lag_7": float(values[i - 7]) if i >= 7 else float(val),
+            })
+
+        return pd.DataFrame(rows)
+
+    def _tft_forecast(self, sku_id: str, history: List[float], days: int) -> List[float]:
+        """Run TFT inference. Returns `days` values."""
+        import torch
+        from pytorch_forecasting import TimeSeriesDataSet
+
+        df = self._build_prediction_df(sku_id, history)
+
+        pred_dataset = TimeSeriesDataSet.from_dataset(
+            self._tft_training_dataset,
+            df,
+            predict=True,
+            stop_randomization=True,
+        )
+        pred_dataloader = pred_dataset.to_dataloader(
+            train=False, batch_size=1, num_workers=0
+        )
+
+        with torch.no_grad():
+            preds = self._tft_model.predict(
+                pred_dataloader,
+                mode="prediction",       # returns median (q50) by default
+                return_x=True,
+                return_index=True,
+            )
+
+        # ---- Robust shape handling ----
+        # Depending on pytorch-forecasting version, output can be:
+        #   - (batch, seq)                  -> median prediction
+        #   - (batch, seq, 1)               -> median with extra dim
+        #   - tensor directly (no .output)  -> rare
+        out = preds.output if hasattr(preds, "output") else preds
+        out_np = out.cpu().numpy()
+
+        # Squeeze down to 1D list
+        out_np = np.squeeze(out_np)
+        if out_np.ndim == 0:
+            out_np = np.array([float(out_np)])
+        elif out_np.ndim > 1:
+            # Take first row if still 2D+
+            out_np = out_np.flatten()
+
+        # Non-negative, list of floats
+        forecast = [max(0.0, float(v)) for v in out_np.tolist()]
+
+        if days <= len(forecast):
+            return forecast[:days]
+
+        extra = self._statistical_forecast(history, days - len(forecast))
+        return forecast + extra
+
+    # ============================================================
+    # STATISTICAL FALLBACK
     # ============================================================
 
     def _statistical_forecast(
@@ -64,17 +224,7 @@ class ForecastAgent:
         alpha: float = 0.3,
         beta: float = 0.1,
     ) -> List[float]:
-        """Forecast using double exponential smoothing + weekly seasonality.
-
-        Args:
-            history: Historical daily sales (oldest first).
-            days: Number of days to forecast.
-            alpha: Level smoothing factor (0, 1).
-            beta: Trend smoothing factor (0, 1).
-
-        Returns:
-            List of daily forecasts, length = days.
-        """
+        """Holt-Winters-lite forecast."""
         if not history:
             return [10.0] * days
 
@@ -82,7 +232,6 @@ class ForecastAgent:
         if not clean:
             return [10.0] * days
 
-        # ---- Weekly seasonal indices (7-day cycle) ----
         seasonal = np.ones(7)
         if len(clean) >= 14:
             by_dow = [[] for _ in range(7)]
@@ -93,40 +242,24 @@ class ForecastAgent:
                 if by_dow[d]:
                     seasonal[d] = float(np.mean(by_dow[d])) / overall_mean
 
-        # ---- Deseasonalize ----
         deseason = [
             clean[i] / seasonal[i % 7] if seasonal[i % 7] > 0 else clean[i]
             for i in range(len(clean))
         ]
 
-        # ---- Double exponential smoothing (level + trend) ----
         level = deseason[0]
         trend = 0.0
         for val in deseason[1:]:
-            prev_level = level
+            prev = level
             level = alpha * val + (1 - alpha) * (level + trend)
-            trend = beta * (level - prev_level) + (1 - beta) * trend
+            trend = beta * (level - prev) + (1 - beta) * trend
 
-        # ---- Forecast: (level + trend*h) * seasonal[dow] ----
         start_dow = len(clean) % 7
-        forecasts: List[float] = []
+        out = []
         for h in range(1, days + 1):
             base = level + trend * h
-            seasonal_factor = seasonal[(start_dow + h - 1) % 7]
-            forecasts.append(max(0.0, base * seasonal_factor))
-
-        return forecasts
-
-    # ============================================================
-    # TFT INFERENCE (stub — activated when checkpoint arrives)
-    # ============================================================
-
-    def _tft_forecast(self, history: List[float], days: int) -> List[float]:
-        """Run TFT inference. Requires training_dataset.pkl for covariates."""
-        raise NotImplementedError(
-            "TFT inference requires training_dataset.pkl and proper DataLoader. "
-            "See Sara's notebook for the exact predict() call."
-        )
+            out.append(max(0.0, base * seasonal[(start_dow + h - 1) % 7]))
+        return out
 
     # ============================================================
     # PUBLIC API
@@ -138,22 +271,11 @@ class ForecastAgent:
         days: int = 14,
         history: Optional[List[float]] = None,
     ) -> dict:
-        """Generate a demand forecast.
-
-        Args:
-            sku_id: Product identifier.
-            days: Forecast horizon (1-30).
-            history: Historical daily sales. If None, generates
-                     deterministic synthetic history from sku_id.
-
-        Returns:
-            Dict with keys: sku_id, forecast, confidence, method, days.
-        """
+        """Generate a demand forecast."""
         if days <= 0 or days > 30:
             raise ValueError(f"days must be in [1, 30], got {days}")
 
         if history is None:
-            # Deterministic synthetic history seeded by SKU
             rng = np.random.default_rng(abs(hash(sku_id)) % (2**32))
             base = rng.uniform(8, 25)
             history = [
@@ -163,11 +285,11 @@ class ForecastAgent:
 
         if self._tft_available:
             try:
-                forecast = self._tft_forecast(history, days)
+                forecast = self._tft_forecast(sku_id, history, days)
                 method = "tft"
                 confidence = 0.89
             except Exception as exc:
-                logger.error("TFT inference failed: %s — falling back", exc)
+                logger.error(f"TFT inference failed: {exc} - falling back")
                 forecast = self._statistical_forecast(history, days)
                 method = "statistical"
                 confidence = 0.75
