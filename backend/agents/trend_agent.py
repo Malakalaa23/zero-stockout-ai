@@ -44,6 +44,9 @@ class TrendAgent:
     # Cache TTL in seconds (10 minutes)
     CACHE_TTL = 600
 
+    # Throttle Google Trends to stay under rate limit (10 req/min)
+    GOOGLE_THROTTLE_SECONDS = 1.5
+
     def __init__(
         self,
         enabled: bool = True,
@@ -53,6 +56,7 @@ class TrendAgent:
     ) -> None:
         self.enabled = enabled
         self._cache: dict[str, tuple[dict, float]] = {}
+        self._last_google_call: float = 0.0
 
         # Source availability flags
         self._pytrends_available = False
@@ -185,8 +189,18 @@ class TrendAgent:
     # ============================================================
 
     def _google_trends(self, term: str) -> dict:
-        """Fetch 90-day search interest from Google Trends."""
+        """Fetch 90-day search interest from Google Trends.
+
+        Throttled to 1 call every GOOGLE_THROTTLE_SECONDS seconds
+        to stay under Google's rate limit.
+        """
         try:
+            # Polite throttle — respect Google's rate limits
+            elapsed = time.time() - self._last_google_call
+            if elapsed < self.GOOGLE_THROTTLE_SECONDS:
+                time.sleep(self.GOOGLE_THROTTLE_SECONDS - elapsed)
+            self._last_google_call = time.time()
+
             from pytrends.request import TrendReq
 
             pytrends = TrendReq(hl="en-US", tz=0, timeout=(10, 25))
@@ -273,9 +287,6 @@ class TrendAgent:
 
     def _twitter_trend(self, term: str) -> dict:
         """Twitter/X search — requires authentication. Skipped if not logged in."""
-        # twikit requires an authenticated session. Without stored cookies or
-        # credentials, we can't search. Return graceful "requires_authentication"
-        # so the aggregator skips this source.
         return {"ok": False, "reason": "requires_authentication"}
 
     # ============================================================
