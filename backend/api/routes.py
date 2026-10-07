@@ -20,14 +20,37 @@ logger = logging.getLogger(__name__)
 from agents.decision_agent import TFTMPIR_DecisionAgent
 from agents.rag_agent import get_rag_agent
 from agents.forecast_agent import ForecastAgent
+from agents.chat_agent import get_zad_agent
 
 # VisionAgent is imported lazily inside endpoints to avoid
 # crashing the whole API if ultralytics fails to load.
 
 # ============================================================
-# AGENT INSTANCES (loaded once at import time)
+# CACHED AGENT SINGLETONS
 # ============================================================
+# Loading YOLO / NN from disk takes seconds. Cache them once
+# at first use so subsequent requests are fast.
 _forecast_agent = ForecastAgent()
+_vision_agent = None
+_decision_agent_singleton = None
+
+
+def get_vision_agent():
+    """Return a cached VisionAgent, loading it on first call."""
+    global _vision_agent
+    if _vision_agent is None:
+        from agents.vision_agent import VisionAgent
+        _vision_agent = VisionAgent()
+    return _vision_agent
+
+
+def get_decision_agent():
+    """Return a cached decision agent (default cost params)."""
+    global _decision_agent_singleton
+    if _decision_agent_singleton is None:
+        _decision_agent_singleton = TFTMPIR_DecisionAgent()
+    return _decision_agent_singleton
+
 
 # ============================================================
 # ROUTER
@@ -48,7 +71,9 @@ async def health_check():
             "forecast": "operational",
             "decision": "operational",
             "vision": "operational",
-            "rag": "operational"
+            "rag": "operational",
+            "chat": "operational",
+            "voice": "operational"
         }
     }
 
@@ -62,13 +87,6 @@ async def forecast(sku_id: str, days: int = 14):
 
     Uses TFT if checkpoint is available at backend/models/best-tft.ckpt.
     Otherwise uses statistical exponential smoothing with weekly seasonality.
-
-    Args:
-        sku_id: Product SKU identifier
-        days: Number of days to forecast (default: 14, max: 30)
-
-    Returns:
-        Forecast with values, confidence, and method
     """
     try:
         if not sku_id or sku_id.isspace():
@@ -149,18 +167,12 @@ async def decision(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# VISION - Uses Real YOLO VisionAgent
+# VISION - Uses Real YOLO VisionAgent (cached)
 # ============================================================
 @router.post("/vision")
 async def vision(file: UploadFile = File(None)):
     """
     Analyze package image for defects using the trained YOLO model.
-
-    Args:
-        file: Uploaded image file
-
-    Returns:
-        Detection results with damaged/intact counts
     """
     if not file:
         return {
@@ -174,19 +186,16 @@ async def vision(file: UploadFile = File(None)):
 
     tmp_path = None
     try:
-        # Save uploaded file to a temp path
         contents = await file.read()
         suffix = Path(file.filename or "image.jpg").suffix or ".jpg"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(contents)
             tmp_path = tmp.name
 
-        # Lazy import so API boots even if ultralytics fails
-        from agents.vision_agent import VisionAgent
-        agent = VisionAgent()
+        # Use cached agent
+        agent = get_vision_agent()
         result = agent.detect(tmp_path)
 
-        # Count damaged vs intact
         damaged = sum(1 for d in result["detections"] if d["class"] == "damaged")
         intact = sum(1 for d in result["detections"] if d["class"] == "no damaged")
 
@@ -223,12 +232,6 @@ async def vision(file: UploadFile = File(None)):
 async def rag(query: str):
     """
     Query knowledge base for policy, inventory, and product information.
-
-    Args:
-        query: User question (English or Arabic)
-
-    Returns:
-        Answer with source and confidence
     """
     try:
         if not query or query.isspace():
@@ -247,6 +250,40 @@ async def rag(query: str):
         raise
     except Exception as e:
         logger.error(f"RAG error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# CHAT - Zad, the bilingual AI teammate
+# ============================================================
+@router.post("/chat")
+async def chat(query: str, lang: str = "auto"):
+    """
+    Zad — the conversational AI teammate.
+
+    Answers any question in English or Egyptian Arabic.
+    Uses local LLM (Qwen2.5-1.5B) if transformers is installed.
+    Falls back to Egyptian-flavored templates otherwise.
+
+    Args:
+        query: User question (any language)
+        lang:  "auto" (default), "en", or "ar"
+
+    Returns:
+        Answer from Zad
+    """
+    try:
+        if not query or query.isspace():
+            raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+        agent = get_zad_agent()
+        result = agent.answer(query, lang=lang)
+        result["timestamp"] = datetime.now().isoformat()
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
@@ -325,13 +362,7 @@ async def predict_full(
     """
     End-to-end pipeline: Vision + Forecast + Decision.
 
-    This is the cross-agent endpoint. It:
-      1. Forecasts demand for the SKU
-      2. Detects damage from an uploaded image (if provided)
-      3. Adjusts effective stock for damaged units
-      4. Computes optimal order quantity via the Decision Agent
-      5. Returns a SITUATION REPORT — never auto-orders.
-
+    Returns a SITUATION REPORT — never auto-orders.
     Human-in-the-loop: the caller must approve/modify/reject.
     """
     try:
@@ -358,8 +389,7 @@ async def predict_full(
                     tmp.write(contents)
                     tmp_path = tmp.name
 
-                from agents.vision_agent import VisionAgent
-                v_agent = VisionAgent()
+                v_agent = get_vision_agent()
                 v_result = v_agent.detect(tmp_path)
                 damage_detections = v_result["detections"]
                 damaged_count = sum(1 for d in damage_detections if d["class"] == "damaged")
@@ -376,7 +406,7 @@ async def predict_full(
         effective_stock = max(0, current_stock - damaged_count)
 
         # ---------- 4. DECISION ----------
-        agent = TFTMPIR_DecisionAgent()
+        agent = get_decision_agent()
         qty, cost, method = agent.optimal_quantity(
             demand_forecast=demand,
             current_stock=effective_stock,
@@ -461,6 +491,7 @@ async def root():
             "/predict/decision",
             "/predict/vision",
             "/predict/rag",
+            "/predict/chat",
             "/predict/voice/transcribe",
             "/predict/full"
         ]
