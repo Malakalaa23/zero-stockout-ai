@@ -73,20 +73,33 @@ async def health_check():
             "vision": "operational",
             "rag": "operational",
             "chat": "operational",
-            "voice": "operational"
+            "voice": "operational",
+            "trend": "operational"
         }
     }
 
 # ============================================================
-# FORECAST - Uses real ForecastAgent (statistical or TFT)
+# FORECAST - Uses TFT + multi-source trend boost + statistical fallback
 # ============================================================
 @router.post("/forecast")
-async def forecast(sku_id: str, days: int = 14):
+async def forecast(
+    sku_id: str,
+    days: int = 14,
+    product_name: Optional[str] = None,
+):
     """
     Generate demand forecast for a SKU.
 
-    Uses TFT if checkpoint is available at backend/models/best-tft.ckpt.
-    Otherwise uses statistical exponential smoothing with weekly seasonality.
+    Uses TFT (Sara's transformer) if checkpoint is available.
+    Applies multi-source trend boost (Google Trends, Reddit, Twitter/X,
+    Yahoo Finance, News Sentiment) if `product_name` is provided.
+    Falls back to statistical smoothing if TFT is unavailable.
+
+    Args:
+        sku_id: SKU identifier (required)
+        days: Forecast horizon, 1-30 (default 14)
+        product_name: Optional human-readable name for trend search
+                     (e.g., "wireless earbuds")
     """
     try:
         if not sku_id or sku_id.isspace():
@@ -94,7 +107,11 @@ async def forecast(sku_id: str, days: int = 14):
         if days <= 0 or days > 30:
             raise HTTPException(status_code=400, detail="days must be between 1 and 30")
 
-        result = _forecast_agent.predict(sku_id=sku_id, days=days)
+        result = _forecast_agent.predict(
+            sku_id=sku_id,
+            days=days,
+            product_name=product_name,
+        )
         result["timestamp"] = datetime.now().isoformat()
         return result
 
@@ -116,7 +133,8 @@ async def decision(
     holding_cost: float = 2.0,
     stockout_cost: float = 100.0,
     shipping_base: float = 50.0,
-    shipping_per_unit: float = 5.0
+    shipping_per_unit: float = 5.0,
+    product_name: Optional[str] = None,
 ):
     """
     Calculate optimal order quantity using the TFT-MPIR Decision Agent.
@@ -128,8 +146,8 @@ async def decision(
         if current_stock < 0:
             raise HTTPException(status_code=400, detail="Current stock cannot be negative")
 
-        # Get forecast from the forecast endpoint
-        fore = await forecast(sku_id, forecast_days)
+        # Get forecast (with trend boost)
+        fore = await forecast(sku_id, forecast_days, product_name)
         forecast_values = fore["forecast"]
 
         # Instantiate the agent with the request's cost parameters
@@ -263,13 +281,6 @@ async def chat(query: str, lang: str = "auto"):
     Answers any question in English or Egyptian Arabic.
     Uses local LLM (Qwen2.5-1.5B) if transformers is installed.
     Falls back to Egyptian-flavored templates otherwise.
-
-    Args:
-        query: User question (any language)
-        lang:  "auto" (default), "en", or "ar"
-
-    Returns:
-        Answer from Zad
     """
     try:
         if not query or query.isspace():
@@ -349,7 +360,7 @@ async def voice_transcribe(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Transcription error: {str(e)}")
 
 # ============================================================
-# FULL PIPELINE - Vision + Forecast + Decision (Cross-Agent)
+# FULL PIPELINE - Trend + Vision + Forecast + Decision
 # ============================================================
 @router.post("/full")
 async def predict_full(
@@ -357,22 +368,32 @@ async def predict_full(
     current_stock: int,
     unit_cost: float = 10.0,
     forecast_days: int = 14,
+    product_name: Optional[str] = None,
     image: UploadFile = File(None)
 ):
     """
-    End-to-end pipeline: Vision + Forecast + Decision.
+    End-to-end pipeline: Trend + Forecast + Vision + Decision.
 
     Returns a SITUATION REPORT — never auto-orders.
     Human-in-the-loop: the caller must approve/modify/reject.
+
+    Args:
+        sku_id: SKU identifier
+        current_stock: Current on-hand inventory
+        unit_cost: Cost per unit for decision features
+        forecast_days: Forecast horizon (1-30)
+        product_name: Optional human-readable name for trend detection
+        image: Optional package image for damage detection
     """
     try:
         if current_stock < 0:
             raise HTTPException(status_code=400, detail="Current stock cannot be negative")
 
-        # ---------- 1. FORECAST ----------
-        fore = await forecast(sku_id, forecast_days)
+        # ---------- 1. FORECAST (with trend) ----------
+        fore = await forecast(sku_id, forecast_days, product_name)
         demand = fore["forecast"]
         expected_demand = sum(demand)
+        trend_info = fore.get("trend", {})
 
         # ---------- 2. VISION (optional) ----------
         damaged_count = 0
@@ -416,6 +437,13 @@ async def predict_full(
 
         deficit = max(0, expected_demand - effective_stock)
 
+        # Build trend-aware rationale
+        trend_note = ""
+        if trend_info and trend_info.get("direction") == "rising":
+            trend_note = f" Trend detected (rising) — forecast boosted ×{trend_info.get('multiplier', 1.0):.2f}."
+        elif trend_info and trend_info.get("direction") == "declining":
+            trend_note = f" Trend detected (declining) — forecast dampened ×{trend_info.get('multiplier', 1.0):.2f}."
+
         # ---------- 5. SITUATION REPORT ----------
         return {
             "sku_id": sku_id,
@@ -432,6 +460,7 @@ async def predict_full(
                 "confidence": fore.get("confidence", 0.85),
                 "method": fore.get("method", "statistical"),
             },
+            "trend": trend_info,
             "damage_detections": damage_detections,
             "vision_error": vision_error,
             "recommendation": {
@@ -442,7 +471,7 @@ async def predict_full(
                     f"Predicted demand over {forecast_days} days: {expected_demand:.0f} units. "
                     f"Effective stock: {effective_stock} units "
                     f"({damaged_count} damaged, {current_stock} current). "
-                    f"Recommended order: {qty} units."
+                    f"Recommended order: {qty} units.{trend_note}"
                 ),
             },
             "human_action_required": True,
@@ -453,7 +482,8 @@ async def predict_full(
                 f"  • Effective stock: {effective_stock} units\n"
                 f"  • Predicted demand: {expected_demand:.0f} units\n"
                 f"  • Recommended order: {qty} units\n"
-                f"\n"
+                + (f"  • Trend: {trend_info.get('direction', 'stable')} (×{trend_info.get('multiplier', 1.0):.2f})\n" if trend_info else "")
+                + f"\n"
                 f"⚠️ Awaiting your decision. Approve, modify, or reject."
             ),
             "timestamp": datetime.now().isoformat(),
@@ -470,7 +500,7 @@ async def predict_full(
 # ============================================================
 app = FastAPI(
     title="Zero-Stockout AI API",
-    description="TFT-MPIR Inventory Optimization System with 19% cost reduction",
+    description="TFT-MPIR Inventory Optimization System with multi-source trend detection and 19% cost reduction",
     version="1.0.0"
 )
 

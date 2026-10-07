@@ -2,9 +2,8 @@
 Forecast Agent — demand forecasting.
 
 Primary: TFT (Temporal Fusion Transformer) checkpoint from Sara.
+Trend boost: Multi-source real-time trend detection (Google Trends, Reddit, Twitter/X, Finance, News).
 Fallback: Holt-Winters exponential smoothing with weekly seasonality.
-
-Uses manual model reconstruction to load a GPU-trained checkpoint on CPU.
 
 Author: Sara (Forecast Lead) / integrated by Malak
 """
@@ -20,6 +19,8 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 
+from .trend_agent import TrendAgent
+
 logger = logging.getLogger(__name__)
 
 # TFT model config (from Sara's training)
@@ -32,9 +33,14 @@ TFT_ITEMS = [str(i) for i in range(1, 31)]
 
 
 class ForecastAgent:
-    """Demand forecasting agent with TFT + statistical fallback."""
+    """Demand forecasting agent with TFT + multi-source trend boost + statistical fallback."""
 
-    def __init__(self, model_path: Optional[str] = None, dataset_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        dataset_path: Optional[str] = None,
+        enable_trends: bool = True,
+    ) -> None:
         base = Path(__file__).parent.parent / "models"
         self.model_path = model_path or str(base / "best-tft.ckpt")
         self.dataset_path = dataset_path or str(base / "training_dataset.pkl")
@@ -43,6 +49,13 @@ class ForecastAgent:
         self._tft_training_dataset = None
         self._tft_available = False
         self._load_tft()
+
+        # Advanced multi-source trend agent
+        self._trend_agent = TrendAgent(
+            enabled=enable_trends,
+            reddit_client_id=os.getenv("REDDIT_CLIENT_ID"),
+            reddit_client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
+        )
 
     # ============================================================
     # TFT LOADING — MANUAL RECONSTRUCTION (NO LIGHTNING)
@@ -75,7 +88,6 @@ class ForecastAgent:
             for key in ["loss", "logging_metrics", "state_dict", "monotone_constraints"]:
                 hp.pop(key, None)
 
-            # Reconstruct model from hyperparameters
             logger.info("Reconstructing model from hyperparameters...")
             self._tft_model = TemporalFusionTransformer(**hp)
             self._tft_model.eval()
@@ -183,28 +195,21 @@ class ForecastAgent:
         with torch.no_grad():
             preds = self._tft_model.predict(
                 pred_dataloader,
-                mode="prediction",       # returns median (q50) by default
+                mode="prediction",
                 return_x=True,
                 return_index=True,
             )
 
-        # ---- Robust shape handling ----
-        # Depending on pytorch-forecasting version, output can be:
-        #   - (batch, seq)                  -> median prediction
-        #   - (batch, seq, 1)               -> median with extra dim
-        #   - tensor directly (no .output)  -> rare
+        # Robust shape handling
         out = preds.output if hasattr(preds, "output") else preds
         out_np = out.cpu().numpy()
-
-        # Squeeze down to 1D list
         out_np = np.squeeze(out_np)
+
         if out_np.ndim == 0:
             out_np = np.array([float(out_np)])
         elif out_np.ndim > 1:
-            # Take first row if still 2D+
             out_np = out_np.flatten()
 
-        # Non-negative, list of floats
         forecast = [max(0.0, float(v)) for v in out_np.tolist()]
 
         if days <= len(forecast):
@@ -270,8 +275,25 @@ class ForecastAgent:
         sku_id: str,
         days: int = 14,
         history: Optional[List[float]] = None,
+        product_name: Optional[str] = None,
     ) -> dict:
-        """Generate a demand forecast."""
+        """Generate a demand forecast with multi-source trend boost.
+
+        Args:
+            sku_id: SKU identifier
+            days: Forecast horizon (1-30)
+            history: Optional sales history
+            product_name: Optional human-readable product name for trend search
+
+        Returns:
+            {
+                sku_id, forecast, confidence, method, days,
+                trend: {
+                    trend_score, multiplier, direction, confidence,
+                    sources, sources_available, query_used, fetched_at
+                }
+            }
+        """
         if days <= 0 or days > 30:
             raise ValueError(f"days must be in [1, 30], got {days}")
 
@@ -283,6 +305,7 @@ class ForecastAgent:
                 for i in range(28)
             ]
 
+        # ---- Base forecast (TFT or statistical) ----
         if self._tft_available:
             try:
                 forecast = self._tft_forecast(sku_id, history, days)
@@ -298,10 +321,17 @@ class ForecastAgent:
             method = "statistical"
             confidence = 0.75
 
+        # ---- Apply multi-source trend multiplier ----
+        trend = self._trend_agent.get_trend_score(sku_id, product_name=product_name)
+        if trend["multiplier"] != 1.0:
+            forecast = [max(0.0, v * trend["multiplier"]) for v in forecast]
+            method = f"{method}+trend"
+
         return {
             "sku_id": sku_id,
             "forecast": [round(float(v), 2) for v in forecast],
             "confidence": confidence,
             "method": method,
             "days": days,
+            "trend": trend,
         }
