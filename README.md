@@ -328,12 +328,6 @@ Copyright (c) 2026 Malak and the Zero-Stockout AI Team.
 
 ---
 
-## 🙏 Acknowledgments
-
-SAPiBench · Kaggle/DEPI · PyTorch Forecasting · Ultralytics · Hugging Face · Google Trends · NTI
-
----
-
 **Built with precision. Zero stockouts.**
 
 *Predict shortages before they happen. Buy only what you need. From the best source. At the best price.*
