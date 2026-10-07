@@ -435,5 +435,5 @@ Copyright (c) 2026 Malak and the Zero-Stockout AI Team.
 
 *Predict shortages before they happen. Buy only what you need. From the best source. At the best price.*
 
-⭐ **Star this repo if you found it useful. Let's connect — see [About the Lead Engineer](#-about-the-lead-engineer).**
+
 ```
